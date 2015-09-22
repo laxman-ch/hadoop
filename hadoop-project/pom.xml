@@ -324,6 +324,11 @@
       </dependency>
       <dependency>
         <groupId>org.apache.hadoop</groupId>
+        <artifactId>hadoop-archive-logs</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.hadoop</groupId>
         <artifactId>hadoop-distcp</artifactId>
         <version>${project.version}</version>
       </dependency>
@@ -657,8 +662,8 @@
       </dependency>
       <dependency>
         <groupId>com.amazonaws</groupId>
-        <artifactId>aws-java-sdk</artifactId>
-        <version>1.7.4</version>
+        <artifactId>aws-java-sdk-s3</artifactId>
+        <version>1.10.6</version>
       </dependency>
       <dependency>
         <groupId>org.apache.mina</groupId>
@@ -1121,18 +1126,18 @@
           </environmentVariables>
           <systemPropertyVariables>
 
+            <hadoop.log.dir>${project.build.directory}/log</hadoop.log.dir>
+            <hadoop.tmp.dir>${project.build.directory}/tmp</hadoop.tmp.dir>
 
             <!-- TODO: all references in testcases should be updated to this default -->
             <test.build.dir>${test.build.dir}</test.build.dir>
-            <hadoop.tmp.dir>${hadoop.tmp.dir}</hadoop.tmp.dir>
             <test.build.data>${test.build.data}</test.build.data>
             <test.build.webapps>${test.build.webapps}</test.build.webapps>
             <test.cache.data>${test.cache.data}</test.cache.data>
-            <hadoop.log.dir>${hadoop.log.dir}</hadoop.log.dir>
             <test.build.classes>${test.build.classes}</test.build.classes>
 
             <java.net.preferIPv4Stack>true</java.net.preferIPv4Stack>
-            <java.security.krb5.conf>${basedir}/src/test/resources/krb5.conf</java.security.krb5.conf>
+            <java.security.krb5.conf>${project.build.directory}/test-classes/krb5.conf</java.security.krb5.conf>
             <java.security.egd>${java.security.egd}</java.security.egd>
             <require.test.libhadoop>${require.test.libhadoop}</require.test.libhadoop>
           </systemPropertyVariables>

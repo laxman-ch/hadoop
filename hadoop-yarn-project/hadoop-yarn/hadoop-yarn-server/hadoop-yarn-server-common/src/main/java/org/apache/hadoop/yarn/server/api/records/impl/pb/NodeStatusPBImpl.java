@@ -293,7 +293,7 @@ public class NodeStatusPBImpl extends NodeStatus {
   }
 
   @Override
-  public ResourceUtilization getContainersUtilization() {
+  public synchronized ResourceUtilization getContainersUtilization() {
     NodeStatusProtoOrBuilder p =
         this.viaProto ? this.proto : this.builder;
     if (!p.hasContainersUtilization()) {
@@ -303,7 +303,7 @@ public class NodeStatusPBImpl extends NodeStatus {
   }
 
   @Override
-  public void setContainersUtilization(
+  public synchronized void setContainersUtilization(
       ResourceUtilization containersUtilization) {
     maybeInitBuilder();
     if (containersUtilization == null) {
@@ -312,6 +312,28 @@ public class NodeStatusPBImpl extends NodeStatus {
     }
     this.builder
         .setContainersUtilization(convertToProtoFormat(containersUtilization));
+  }
+
+  @Override
+  public synchronized ResourceUtilization getNodeUtilization() {
+    NodeStatusProtoOrBuilder p =
+        this.viaProto ? this.proto : this.builder;
+    if (!p.hasNodeUtilization()) {
+      return null;
+    }
+    return convertFromProtoFormat(p.getNodeUtilization());
+  }
+
+  @Override
+  public synchronized void setNodeUtilization(
+      ResourceUtilization nodeUtilization) {
+    maybeInitBuilder();
+    if (nodeUtilization == null) {
+      this.builder.clearNodeUtilization();
+      return;
+    }
+    this.builder
+        .setNodeUtilization(convertToProtoFormat(nodeUtilization));
   }
 
   private NodeIdProto convertToProtoFormat(NodeId nodeId) {

@@ -87,9 +87,9 @@ public class TestRMAppLogAggregationStatus {
 
     rmContext =
         new RMContextImpl(rmDispatcher, null, null, null,
-          null, null, null, null, null,
-          new RMApplicationHistoryWriter());
+          null, null, null, null, null);
     rmContext.setSystemMetricsPublisher(new SystemMetricsPublisher());
+    rmContext.setRMApplicationHistoryWriter(mock(RMApplicationHistoryWriter.class));
 
     scheduler = mock(YarnScheduler.class);
     doAnswer(
@@ -489,7 +489,7 @@ public class TestRMAppLogAggregationStatus {
           2, Resource.newInstance(10, 2), "test");
     return new RMAppImpl(this.appId, this.rmContext,
       conf, "test", "test", "default", submissionContext,
-      this.rmContext.getScheduler(),
+      scheduler,
       this.rmContext.getApplicationMasterService(),
       System.currentTimeMillis(), "test",
       null, null);

@@ -99,6 +99,8 @@ public abstract class AbstractYarnScheduler
 
   protected RMContext rmContext;
   
+  private volatile Priority maxClusterLevelAppPriority;
+
   /*
    * All schedulers which are inheriting AbstractYarnScheduler should use
    * concurrent version of 'applications' map.
@@ -131,6 +133,7 @@ public abstract class AbstractYarnScheduler
     configuredMaximumAllocationWaitTime =
         conf.getLong(YarnConfiguration.RM_WORK_PRESERVING_RECOVERY_SCHEDULING_WAIT_MS,
           YarnConfiguration.DEFAULT_RM_WORK_PRESERVING_RECOVERY_SCHEDULING_WAIT_MS);
+    maxClusterLevelAppPriority = getMaxPriorityFromConf(conf);
     createReleaseCache();
     super.serviceInit(conf);
   }
@@ -215,12 +218,12 @@ public abstract class AbstractYarnScheduler
   protected synchronized void containerLaunchedOnNode(
       ContainerId containerId, SchedulerNode node) {
     // Get the application for the finished container
-    SchedulerApplicationAttempt application = getCurrentAttemptForContainer
-        (containerId);
+    SchedulerApplicationAttempt application =
+        getCurrentAttemptForContainer(containerId);
     if (application == null) {
-      LOG.info("Unknown application "
-          + containerId.getApplicationAttemptId().getApplicationId()
-          + " launched container " + containerId + " on node: " + node);
+      LOG.info("Unknown application " + containerId.getApplicationAttemptId()
+          .getApplicationId() + " launched container " + containerId
+          + " on node: " + node);
       this.rmContext.getDispatcher().getEventHandler()
         .handle(new RMNodeCleanContainerEvent(node.getNodeID(), containerId));
       return;
@@ -684,6 +687,7 @@ public abstract class AbstractYarnScheduler
     }
   }
 
+  @Override
   public List<ResourceRequest> getPendingResourceRequestsForAttempt(
       ApplicationAttemptId attemptId) {
     SchedulerApplicationAttempt attempt = getApplicationAttempt(attemptId);
@@ -700,5 +704,35 @@ public abstract class AbstractYarnScheduler
     // Dummy Implementation till Application Priority changes are done in
     // specific scheduler.
     return Priority.newInstance(0);
+  }
+
+  @Override
+  public void updateApplicationPriority(Priority newPriority,
+      ApplicationId applicationId) throws YarnException {
+    // Dummy Implementation till Application Priority changes are done in
+    // specific scheduler.
+  }
+
+  @Override
+  public Priority getMaxClusterLevelAppPriority() {
+    return maxClusterLevelAppPriority;
+  }
+
+  private Priority getMaxPriorityFromConf(Configuration conf) {
+    return Priority.newInstance(conf.getInt(
+        YarnConfiguration.MAX_CLUSTER_LEVEL_APPLICATION_PRIORITY,
+        YarnConfiguration.DEFAULT_CLUSTER_LEVEL_APPLICATION_PRIORITY));
+  }
+
+  @Override
+  public synchronized void setClusterMaxPriority(Configuration conf)
+      throws YarnException {
+    try {
+      maxClusterLevelAppPriority = getMaxPriorityFromConf(conf);
+    } catch (NumberFormatException e) {
+      throw new YarnException(e);
+    }
+    LOG.info("Updated the cluste max priority to maxClusterLevelAppPriority = "
+        + maxClusterLevelAppPriority);
   }
 }

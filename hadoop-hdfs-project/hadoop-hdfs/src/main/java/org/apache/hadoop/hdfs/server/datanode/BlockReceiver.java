@@ -58,6 +58,9 @@ import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 
+import static org.apache.hadoop.io.nativeio.NativeIO.POSIX.POSIX_FADV_DONTNEED;
+import static org.apache.hadoop.io.nativeio.NativeIO.POSIX.SYNC_FILE_RANGE_WRITE;
+
 import com.google.common.annotations.VisibleForTesting;
 
 /** A class that receives a block and writes to its own disk, meanwhile
@@ -114,7 +117,7 @@ class BlockReceiver implements Closeable {
   /** the block to receive */
   private final ExtendedBlock block; 
   /** the replica to write */
-  private final ReplicaInPipelineInterface replicaInfo;
+  private ReplicaInPipelineInterface replicaInfo;
   /** pipeline stage */
   private final BlockConstructionStage stage;
   private final boolean isTransfer;
@@ -256,6 +259,9 @@ class BlockReceiver implements Closeable {
     } catch (ReplicaNotFoundException bne) {
       throw bne;
     } catch(IOException ioe) {
+      if (replicaInfo != null) {
+        replicaInfo.releaseAllBytesReserved();
+      }
       IOUtils.closeStream(this);
       cleanupBlock();
       
@@ -791,12 +797,12 @@ class BlockReceiver implements Closeable {
             this.datanode.getFSDataset().submitBackgroundSyncFileRangeRequest(
                 block, outFd, lastCacheManagementOffset,
                 offsetInBlock - lastCacheManagementOffset,
-                NativeIO.POSIX.SYNC_FILE_RANGE_WRITE);
+                SYNC_FILE_RANGE_WRITE);
           } else {
             NativeIO.POSIX.syncFileRangeIfPossible(outFd,
-                lastCacheManagementOffset, offsetInBlock
-                    - lastCacheManagementOffset,
-                NativeIO.POSIX.SYNC_FILE_RANGE_WRITE);
+                lastCacheManagementOffset,
+                offsetInBlock - lastCacheManagementOffset,
+                SYNC_FILE_RANGE_WRITE);
           }
         }
         //
@@ -812,8 +818,7 @@ class BlockReceiver implements Closeable {
         long dropPos = lastCacheManagementOffset - CACHE_DROP_LAG_BYTES;
         if (dropPos > 0 && dropCacheBehindWrites) {
           NativeIO.POSIX.getCacheManipulator().posixFadviseIfPossible(
-              block.getBlockName(), outFd, 0, dropPos,
-              NativeIO.POSIX.POSIX_FADV_DONTNEED);
+              block.getBlockName(), outFd, 0, dropPos, POSIX_FADV_DONTNEED);
         }
         lastCacheManagementOffset = offsetInBlock;
         long duration = Time.monotonicNow() - begin;
@@ -1151,7 +1156,7 @@ class BlockReceiver implements Closeable {
 
       synchronized(this) {
         if (sending) {
-          wait(PipelineAck.getOOBTimeout(ackStatus));
+          wait(datanode.getOOBTimeout(ackStatus));
           // Didn't get my turn in time. Give up.
           if (sending) {
             throw new IOException("Could not send OOB reponse in time: "

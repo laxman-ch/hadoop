@@ -19,7 +19,13 @@ package org.apache.hadoop.hdfs.server.balancer;
 
 import static org.apache.hadoop.fs.StorageType.DEFAULT;
 import static org.apache.hadoop.fs.StorageType.RAM_DISK;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.*;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_BLOCK_PINNING_ENABLED;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_LAZY_WRITER_INTERVAL_SEC;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_INTERVAL_SEC;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -27,10 +33,11 @@ import static org.junit.Assume.assumeTrue;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.net.InetAddress;
-import java.net.URI;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -45,6 +52,7 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.impl.Log4JLogger;
+import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -59,12 +67,16 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.NameNodeProxies;
-import org.apache.hadoop.hdfs.protocol.*;
+import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.ClientProtocol;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.balancer.Balancer.Cli;
-import org.apache.hadoop.hdfs.server.balancer.Balancer.Parameters;
 import org.apache.hadoop.hdfs.server.balancer.Balancer.Result;
-import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+import org.apache.hadoop.hdfs.server.balancer.BalancerParameters;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.LazyPersistTestCase;
@@ -107,8 +119,6 @@ public class TestBalancer {
   }
 
   public static void initTestSetup() {
-    Dispatcher.setBlockMoveWaitTime(1000L) ;
-
     // do not create id file since it occupies the disk space
     NameNodeConnector.setWrite2IdFile(false);
   }
@@ -117,9 +127,12 @@ public class TestBalancer {
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, DEFAULT_BLOCK_SIZE);
     conf.setInt(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY, DEFAULT_BLOCK_SIZE);
     conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1L);
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 500);
     conf.setLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1L);
     SimulatedFSDataset.setFactory(conf);
+
     conf.setLong(DFSConfigKeys.DFS_BALANCER_MOVEDWINWIDTH_KEY, 2000L);
+    conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1L);
   }
 
   static void initConfWithRamDisk(Configuration conf,
@@ -131,6 +144,8 @@ public class TestBalancer {
     conf.setInt(DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 500);
     conf.setInt(DFS_DATANODE_LAZY_WRITER_INTERVAL_SEC, 1);
     LazyPersistTestCase.initCacheManipulator();
+
+    conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1L);
   }
 
   /* create a file with a length of <code>fileLen</code> */
@@ -304,7 +319,7 @@ public class TestBalancer {
    * @throws TimeoutException
    */
   static void waitForBalancer(long totalUsedSpace, long totalCapacity,
-      ClientProtocol client, MiniDFSCluster cluster, Balancer.Parameters p)
+      ClientProtocol client, MiniDFSCluster cluster, BalancerParameters p)
   throws IOException, TimeoutException {
     waitForBalancer(totalUsedSpace, totalCapacity, client, cluster, p, 0);
   }
@@ -362,7 +377,7 @@ public class TestBalancer {
 
       // start rebalancing
       Collection<URI> namenodes = DFSUtil.getNsServiceRpcUris(conf);
-      int r = Balancer.run(namenodes, Balancer.Parameters.DEFAULT, conf);
+      int r = Balancer.run(namenodes, BalancerParameters.DEFAULT, conf);
       assertEquals(ExitStatus.NO_MOVE_PROGRESS.getExitCode(), r);
       
     } finally {
@@ -378,16 +393,16 @@ public class TestBalancer {
    * @throws TimeoutException
    */
   static void waitForBalancer(long totalUsedSpace, long totalCapacity,
-      ClientProtocol client, MiniDFSCluster cluster, Balancer.Parameters p,
+      ClientProtocol client, MiniDFSCluster cluster, BalancerParameters p,
       int expectedExcludedNodes) throws IOException, TimeoutException {
     long timeout = TIMEOUT;
     long failtime = (timeout <= 0L) ? Long.MAX_VALUE
         : Time.monotonicNow() + timeout;
-    if (!p.nodesToBeIncluded.isEmpty()) {
-      totalCapacity = p.nodesToBeIncluded.size() * CAPACITY;
+    if (!p.getIncludedNodes().isEmpty()) {
+      totalCapacity = p.getIncludedNodes().size() * CAPACITY;
     }
-    if (!p.nodesToBeExcluded.isEmpty()) {
-        totalCapacity -= p.nodesToBeExcluded.size() * CAPACITY;
+    if (!p.getExcludedNodes().isEmpty()) {
+      totalCapacity -= p.getExcludedNodes().size() * CAPACITY;
     }
     final double avgUtilization = ((double)totalUsedSpace) / totalCapacity;
     boolean balanced;
@@ -400,12 +415,12 @@ public class TestBalancer {
       for (DatanodeInfo datanode : datanodeReport) {
         double nodeUtilization = ((double)datanode.getDfsUsed())
             / datanode.getCapacity();
-        if (Dispatcher.Util.isExcluded(p.nodesToBeExcluded, datanode)) {
+        if (Dispatcher.Util.isExcluded(p.getExcludedNodes(), datanode)) {
           assertTrue(nodeUtilization == 0);
           actualExcludedNodeCount++;
           continue;
         }
-        if (!Dispatcher.Util.isIncluded(p.nodesToBeIncluded, datanode)) {
+        if (!Dispatcher.Util.isIncluded(p.getIncludedNodes(), datanode)) {
           assertTrue(nodeUtilization == 0);
           actualExcludedNodeCount++;
           continue;
@@ -621,15 +636,14 @@ public class TestBalancer {
         }
       }
       // run balancer and validate results
-      Balancer.Parameters p = Balancer.Parameters.DEFAULT;
+      BalancerParameters.Builder pBuilder =
+          new BalancerParameters.Builder();
       if (nodes != null) {
-        p = new Balancer.Parameters(
-            Balancer.Parameters.DEFAULT.policy,
-            Balancer.Parameters.DEFAULT.threshold,
-            Balancer.Parameters.DEFAULT.maxIdleIteration,
-            nodes.getNodesToBeExcluded(), nodes.getNodesToBeIncluded(),
-            false);
+        pBuilder.setExcludedNodes(nodes.getNodesToBeExcluded());
+        pBuilder.setIncludedNodes(nodes.getNodesToBeIncluded());
+        pBuilder.setRunDuringUpgrade(false);
       }
+      BalancerParameters p = pBuilder.build();
 
       int expectedExcludedNodes = 0;
       if (nodes != null) {
@@ -652,14 +666,15 @@ public class TestBalancer {
     }
   }
 
-  private void runBalancer(Configuration conf,
-      long totalUsedSpace, long totalCapacity) throws Exception {
-    runBalancer(conf, totalUsedSpace, totalCapacity, Balancer.Parameters.DEFAULT, 0);
+  private void runBalancer(Configuration conf, long totalUsedSpace,
+      long totalCapacity) throws Exception {
+    runBalancer(conf, totalUsedSpace, totalCapacity,
+        BalancerParameters.DEFAULT, 0);
   }
 
-  private void runBalancer(Configuration conf,
-     long totalUsedSpace, long totalCapacity, Balancer.Parameters p,
-     int excludedNodes) throws Exception {
+  private void runBalancer(Configuration conf, long totalUsedSpace,
+      long totalCapacity, BalancerParameters p, int excludedNodes)
+      throws Exception {
     waitForHeartBeat(totalUsedSpace, totalCapacity, client, cluster);
 
     // start rebalancing
@@ -677,7 +692,8 @@ public class TestBalancer {
     waitForBalancer(totalUsedSpace, totalCapacity, client, cluster, p, excludedNodes);
   }
 
-  private static int runBalancer(Collection<URI> namenodes, final Parameters p,
+  private static int runBalancer(Collection<URI> namenodes,
+      final BalancerParameters p,
       Configuration conf) throws IOException, InterruptedException {
     final long sleeptime =
         conf.getLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY,
@@ -694,8 +710,8 @@ public class TestBalancer {
     try {
       connectors = NameNodeConnector.newNameNodeConnectors(namenodes, 
           Balancer.class.getSimpleName(), Balancer.BALANCER_ID_PATH, conf,
-          Balancer.Parameters.DEFAULT.maxIdleIteration);
-    
+              BalancerParameters.DEFAULT.getMaxIdleIteration());
+
       boolean done = false;
       for(int iteration = 0; !done; iteration++) {
         done = true;
@@ -731,45 +747,45 @@ public class TestBalancer {
     return ExitStatus.SUCCESS.getExitCode();
   }
 
-  private void runBalancerCli(Configuration conf,
-      long totalUsedSpace, long totalCapacity,
-      Balancer.Parameters p, boolean useFile, int expectedExcludedNodes) throws Exception {
+  private void runBalancerCli(Configuration conf, long totalUsedSpace,
+      long totalCapacity, BalancerParameters p, boolean useFile,
+      int expectedExcludedNodes) throws Exception {
     waitForHeartBeat(totalUsedSpace, totalCapacity, client, cluster);
     List <String> args = new ArrayList<String>();
     args.add("-policy");
     args.add("datanode");
 
     File excludeHostsFile = null;
-    if (!p.nodesToBeExcluded.isEmpty()) {
+    if (!p.getExcludedNodes().isEmpty()) {
       args.add("-exclude");
       if (useFile) {
         excludeHostsFile = new File ("exclude-hosts-file");
         PrintWriter pw = new PrintWriter(excludeHostsFile);
-        for (String host: p.nodesToBeExcluded) {
+        for (String host : p.getExcludedNodes()) {
           pw.write( host + "\n");
         }
         pw.close();
         args.add("-f");
         args.add("exclude-hosts-file");
       } else {
-        args.add(StringUtils.join(p.nodesToBeExcluded, ','));
+        args.add(StringUtils.join(p.getExcludedNodes(), ','));
       }
     }
 
     File includeHostsFile = null;
-    if (!p.nodesToBeIncluded.isEmpty()) {
+    if (!p.getIncludedNodes().isEmpty()) {
       args.add("-include");
       if (useFile) {
         includeHostsFile = new File ("include-hosts-file");
         PrintWriter pw = new PrintWriter(includeHostsFile);
-        for (String host: p.nodesToBeIncluded){
+        for (String host : p.getIncludedNodes()) {
           pw.write( host + "\n");
         }
         pw.close();
         args.add("-f");
         args.add("include-hosts-file");
       } else {
-        args.add(StringUtils.join(p.nodesToBeIncluded, ','));
+        args.add(StringUtils.join(p.getIncludedNodes(), ','));
       }
     }
 
@@ -863,13 +879,11 @@ public class TestBalancer {
       Collection<URI> namenodes = DFSUtil.getNsServiceRpcUris(conf);
       Set<String>  datanodes = new HashSet<String>();
       datanodes.add(cluster.getDataNodes().get(0).getDatanodeId().getHostName());
-      Balancer.Parameters p = new Balancer.Parameters(
-          Balancer.Parameters.DEFAULT.policy,
-          Balancer.Parameters.DEFAULT.threshold,
-          Balancer.Parameters.DEFAULT.maxIdleIteration,
-          datanodes, Balancer.Parameters.DEFAULT.nodesToBeIncluded,
-          false);
-      final int r = Balancer.run(namenodes, p, conf);
+      BalancerParameters.Builder pBuilder =
+          new BalancerParameters.Builder();
+      pBuilder.setExcludedNodes(datanodes);
+      pBuilder.setRunDuringUpgrade(false);
+      final int r = Balancer.run(namenodes, pBuilder.build(), conf);
       assertEquals(ExitStatus.SUCCESS.getExitCode(), r);
     } finally {
       cluster.shutdown();
@@ -927,7 +941,7 @@ public class TestBalancer {
         new String[] {RACK0, RACK1});
   }
   
-  @Test(timeout=100000)
+  @Test(expected=HadoopIllegalArgumentException.class)
   public void testBalancerWithZeroThreadsForMove() throws Exception {
     Configuration conf = new HdfsConfiguration();
     conf.setInt(DFSConfigKeys.DFS_DATANODE_BALANCE_MAX_NUM_CONCURRENT_MOVES_KEY, 0);
@@ -1050,6 +1064,34 @@ public class TestBalancer {
     } catch (IllegalArgumentException e) {
 
     }
+
+    parameters = new String[] { "-blockpools" };
+    try {
+      Balancer.Cli.parse(parameters);
+      fail("IllegalArgumentException is expected when a value "
+          + "is not specified for the blockpool flag");
+    } catch (IllegalArgumentException e) {
+
+    }
+  }
+
+  @Test
+  public void testBalancerCliParseBlockpools() {
+    String[] parameters = new String[] { "-blockpools", "bp-1,bp-2,bp-3" };
+    BalancerParameters p = Balancer.Cli.parse(parameters);
+    assertEquals(3, p.getBlockPools().size());
+
+    parameters = new String[] { "-blockpools", "bp-1" };
+    p = Balancer.Cli.parse(parameters);
+    assertEquals(1, p.getBlockPools().size());
+
+    parameters = new String[] { "-blockpools", "bp-1,,bp-2" };
+    p = Balancer.Cli.parse(parameters);
+    assertEquals(3, p.getBlockPools().size());
+
+    parameters = new String[] { "-blockpools", "bp-1," };
+    p = Balancer.Cli.parse(parameters);
+    assertEquals(1, p.getBlockPools().size());
   }
 
   /**
@@ -1078,7 +1120,8 @@ public class TestBalancer {
     excludeHosts.add( "datanodeZ");
     doTest(conf, new long[]{CAPACITY, CAPACITY}, new String[]{RACK0, RACK1}, CAPACITY, RACK2,
         new HostNameBasedNodes(new String[] {"datanodeX", "datanodeY", "datanodeZ"},
-        excludeHosts, Parameters.DEFAULT.nodesToBeIncluded), false, false);
+            excludeHosts, BalancerParameters.DEFAULT.getIncludedNodes()),
+        false, false);
   }
 
   /**
@@ -1106,9 +1149,11 @@ public class TestBalancer {
     Set<String> excludeHosts = new HashSet<String>();
     excludeHosts.add( "datanodeY");
     excludeHosts.add( "datanodeZ");
-    doTest(conf, new long[]{CAPACITY, CAPACITY}, new String[]{RACK0, RACK1}, CAPACITY, RACK2,
-      new HostNameBasedNodes(new String[] {"datanodeX", "datanodeY", "datanodeZ"}, excludeHosts,
-      Parameters.DEFAULT.nodesToBeIncluded), true, false);
+    doTest(conf, new long[] { CAPACITY, CAPACITY },
+        new String[] { RACK0, RACK1 }, CAPACITY, RACK2, new HostNameBasedNodes(
+            new String[] { "datanodeX", "datanodeY", "datanodeZ" },
+            excludeHosts, BalancerParameters.DEFAULT.getIncludedNodes()), true,
+        false);
   }
 
   /**
@@ -1138,7 +1183,8 @@ public class TestBalancer {
     excludeHosts.add( "datanodeZ");
     doTest(conf, new long[]{CAPACITY, CAPACITY}, new String[]{RACK0, RACK1}, CAPACITY, RACK2,
         new HostNameBasedNodes(new String[] {"datanodeX", "datanodeY", "datanodeZ"},
-        excludeHosts, Parameters.DEFAULT.nodesToBeIncluded), true, true);
+            excludeHosts, BalancerParameters.DEFAULT.getIncludedNodes()), true,
+        true);
   }
 
   /**
@@ -1167,7 +1213,8 @@ public class TestBalancer {
     includeHosts.add( "datanodeY");
     doTest(conf, new long[]{CAPACITY, CAPACITY}, new String[]{RACK0, RACK1}, CAPACITY, RACK2,
         new HostNameBasedNodes(new String[] {"datanodeX", "datanodeY", "datanodeZ"},
-        Parameters.DEFAULT.nodesToBeExcluded, includeHosts), false, false);
+            BalancerParameters.DEFAULT.getExcludedNodes(), includeHosts),
+        false, false);
   }
 
   /**
@@ -1196,7 +1243,8 @@ public class TestBalancer {
     includeHosts.add( "datanodeY");
     doTest(conf, new long[]{CAPACITY, CAPACITY}, new String[]{RACK0, RACK1}, CAPACITY, RACK2,
         new HostNameBasedNodes(new String[] {"datanodeX", "datanodeY", "datanodeZ"},
-        Parameters.DEFAULT.nodesToBeExcluded, includeHosts), true, false);
+            BalancerParameters.DEFAULT.getExcludedNodes(), includeHosts), true,
+        false);
   }
 
   /**
@@ -1225,7 +1273,8 @@ public class TestBalancer {
     includeHosts.add( "datanodeY");
     doTest(conf, new long[]{CAPACITY, CAPACITY}, new String[]{RACK0, RACK1}, CAPACITY, RACK2,
         new HostNameBasedNodes(new String[] {"datanodeX", "datanodeY", "datanodeZ"},
-        Parameters.DEFAULT.nodesToBeExcluded, includeHosts), true, true);
+            BalancerParameters.DEFAULT.getExcludedNodes(), includeHosts), true,
+        true);
   }
 
   /**
@@ -1298,7 +1347,7 @@ public class TestBalancer {
       Collection<URI> namenodes = DFSUtil.getNsServiceRpcUris(conf);
 
       // Run Balancer
-      final Balancer.Parameters p = Parameters.DEFAULT;
+      final BalancerParameters p = BalancerParameters.DEFAULT;
       final int r = Balancer.run(namenodes, p, conf);
 
       // Validate no RAM_DISK block should be moved
@@ -1322,6 +1371,8 @@ public class TestBalancer {
     conf.setLong(DFS_HEARTBEAT_INTERVAL_KEY, 1);
     conf.setInt(DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 500);
     conf.setLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1);
+
+    conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1L);
 
     final int BLOCK_SIZE = 1024*1024;
     cluster = new MiniDFSCluster
@@ -1348,7 +1399,7 @@ public class TestBalancer {
       Collection<URI> namenodes = DFSUtil.getNsServiceRpcUris(conf);
 
       // Run balancer
-      final Balancer.Parameters p = Parameters.DEFAULT;
+      final BalancerParameters p = BalancerParameters.DEFAULT;
 
       fs.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_ENTER);
       fs.rollingUpgrade(HdfsConstants.RollingUpgradeAction.PREPARE);
@@ -1359,13 +1410,10 @@ public class TestBalancer {
           Balancer.run(namenodes, p, conf));
 
       // Should work with the -runDuringUpgrade flag.
-      final Balancer.Parameters runDuringUpgrade =
-          new Balancer.Parameters(Parameters.DEFAULT.policy,
-              Parameters.DEFAULT.threshold,
-              Parameters.DEFAULT.maxIdleIteration,
-              Parameters.DEFAULT.nodesToBeExcluded,
-              Parameters.DEFAULT.nodesToBeIncluded,
-              true);
+      BalancerParameters.Builder b =
+          new BalancerParameters.Builder();
+      b.setRunDuringUpgrade(true);
+      final BalancerParameters runDuringUpgrade = b.build();
       assertEquals(ExitStatus.SUCCESS.getExitCode(),
           Balancer.run(namenodes, runDuringUpgrade, conf));
 
@@ -1396,6 +1444,8 @@ public class TestBalancer {
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
     conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1L);
     conf.setLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1L);
+
+    conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1L);
 
     int numOfDatanodes =2;
     final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
@@ -1430,7 +1480,7 @@ public class TestBalancer {
       // update space info
       cluster.triggerHeartbeats();
 
-      Balancer.Parameters p = Balancer.Parameters.DEFAULT;
+      BalancerParameters p = BalancerParameters.DEFAULT;
       Collection<URI> namenodes = DFSUtil.getNsServiceRpcUris(conf);
       final int r = Balancer.run(namenodes, p, conf);
 
@@ -1518,6 +1568,119 @@ public class TestBalancer {
     }
   }
 
+  /** Balancer should not move blocks with size < minBlockSize. */
+  @Test(timeout=60000)
+  public void testMinBlockSizeAndSourceNodes() throws Exception {
+    final Configuration conf = new HdfsConfiguration();
+    initConf(conf);
+ 
+    final short replication = 3;
+    final long[] lengths = {10, 10, 10, 10}; 
+    final long[] capacities = new long[replication];
+    final long totalUsed = capacities.length * sum(lengths);
+    Arrays.fill(capacities, 1000);
+
+    cluster = new MiniDFSCluster.Builder(conf)
+        .numDataNodes(capacities.length)
+        .simulatedCapacities(capacities)
+        .build();
+    final DistributedFileSystem dfs = cluster.getFileSystem();
+
+    try {
+      cluster.waitActive();
+      client = NameNodeProxies.createProxy(conf, dfs.getUri(),
+          ClientProtocol.class).getProxy();
+      
+      // fill up the cluster to be 80% full
+      for(int i = 0; i < lengths.length; i++) {
+        final long size = lengths[i];
+        final Path p = new Path("/file" + i + "_size" + size);
+        try(final OutputStream out = dfs.create(p)) {
+          for(int j = 0; j < size; j++) {
+            out.write(j);
+          }
+        }
+      }
+      
+      // start up an empty node with the same capacity
+      cluster.startDataNodes(conf, capacities.length, true, null, null, capacities);
+      LOG.info("capacities    = " + Arrays.toString(capacities));
+      LOG.info("totalUsedSpace= " + totalUsed);
+      LOG.info("lengths       = " + Arrays.toString(lengths) + ", #=" + lengths.length);
+      waitForHeartBeat(totalUsed, 2*capacities[0]*capacities.length, client, cluster);
+      
+      final Collection<URI> namenodes = DFSUtil.getNsServiceRpcUris(conf);
+
+      { // run Balancer with min-block-size=50
+        BalancerParameters.Builder b =
+            new BalancerParameters.Builder();
+        b.setBalancingPolicy(BalancingPolicy.Node.INSTANCE);
+        b.setThreshold(1);
+        final BalancerParameters p = b.build();
+
+        conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 50);
+        final int r = Balancer.run(namenodes, p, conf);
+        assertEquals(ExitStatus.NO_MOVE_PROGRESS.getExitCode(), r);
+      }
+      
+      conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1);
+
+      { // run Balancer with empty nodes as source nodes
+        final Set<String> sourceNodes = new HashSet<>();
+        final List<DataNode> datanodes = cluster.getDataNodes();
+        for(int i = capacities.length; i < datanodes.size(); i++) {
+          sourceNodes.add(datanodes.get(i).getDisplayName());
+        }
+        BalancerParameters.Builder b =
+            new BalancerParameters.Builder();
+        b.setBalancingPolicy(BalancingPolicy.Node.INSTANCE);
+        b.setThreshold(1);
+        b.setSourceNodes(sourceNodes);
+        final BalancerParameters p = b.build();
+
+        conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 50);
+        final int r = Balancer.run(namenodes, p, conf);
+        assertEquals(ExitStatus.NO_MOVE_BLOCK.getExitCode(), r);
+      }
+
+      { // run Balancer with a filled node as a source node
+        final Set<String> sourceNodes = new HashSet<>();
+        final List<DataNode> datanodes = cluster.getDataNodes();
+        sourceNodes.add(datanodes.get(0).getDisplayName());
+        BalancerParameters.Builder b =
+            new BalancerParameters.Builder();
+        b.setBalancingPolicy(BalancingPolicy.Node.INSTANCE);
+        b.setThreshold(1);
+        b.setSourceNodes(sourceNodes);
+        final BalancerParameters p = b.build();
+
+        conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1);
+        final int r = Balancer.run(namenodes, p, conf);
+        assertEquals(ExitStatus.NO_MOVE_BLOCK.getExitCode(), r);
+      }
+
+      { // run Balancer with all filled node as source nodes
+        final Set<String> sourceNodes = new HashSet<>();
+        final List<DataNode> datanodes = cluster.getDataNodes();
+        for(int i = 0; i < capacities.length; i++) {
+          sourceNodes.add(datanodes.get(i).getDisplayName());
+        }
+        BalancerParameters.Builder b =
+            new BalancerParameters.Builder();
+        b.setBalancingPolicy(BalancingPolicy.Node.INSTANCE);
+        b.setThreshold(1);
+        b.setSourceNodes(sourceNodes);
+        final BalancerParameters p = b.build();
+
+        conf.setLong(DFSConfigKeys.DFS_BALANCER_GETBLOCKS_MIN_BLOCK_SIZE_KEY, 1);
+        final int r = Balancer.run(namenodes, p, conf);
+        assertEquals(ExitStatus.SUCCESS.getExitCode(), r);
+      }
+    } finally {
+      cluster.shutdown();
+    }
+  }
+  
   /**
    * @param args
    */

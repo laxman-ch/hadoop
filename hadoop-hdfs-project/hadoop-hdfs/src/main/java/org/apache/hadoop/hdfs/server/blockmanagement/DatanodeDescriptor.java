@@ -31,25 +31,27 @@ import java.util.Queue;
 import java.util.Set;
 
 import com.google.common.annotations.VisibleForTesting;
-
 import com.google.common.collect.ImmutableList;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.namenode.CachedBlock;
 import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage.State;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 import org.apache.hadoop.hdfs.util.EnumCounters;
 import org.apache.hadoop.hdfs.util.LightWeightHashSet;
 import org.apache.hadoop.util.IntrusiveCollection;
 import org.apache.hadoop.util.Time;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This class extends the DatanodeInfo class with ephemeral information (eg
@@ -59,7 +61,8 @@ import org.apache.hadoop.util.Time;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class DatanodeDescriptor extends DatanodeInfo {
-  public static final Log LOG = LogFactory.getLog(DatanodeDescriptor.class);
+  public static final Logger LOG =
+      LoggerFactory.getLogger(DatanodeDescriptor.class);
   public static final DatanodeDescriptor[] EMPTY_ARRAY = {};
 
   // Stores status of decommissioning.
@@ -221,8 +224,7 @@ public class DatanodeDescriptor extends DatanodeInfo {
   private final BlockQueue<BlockTargetPair> replicateBlocks =
       new BlockQueue<>();
   /** A queue of blocks to be recovered by this datanode */
-  private final BlockQueue<BlockInfoUnderConstruction> recoverBlocks =
-      new BlockQueue<>();
+  private final BlockQueue<BlockInfo> recoverBlocks = new BlockQueue<>();
   /** A set of blocks to be invalidated by this datanode */
   private final LightWeightHashSet<Block> invalidateBlocks =
       new LightWeightHashSet<>();
@@ -319,9 +321,9 @@ public class DatanodeDescriptor extends DatanodeInfo {
         Map.Entry<String, DatanodeStorageInfo> entry = iter.next();
         DatanodeStorageInfo storageInfo = entry.getValue();
         if (storageInfo.getLastBlockReportId() != curBlockReportId) {
-          LOG.info(storageInfo.getStorageID() + " had lastBlockReportId 0x" +
-              Long.toHexString(storageInfo.getLastBlockReportId()) +
-              ", but curBlockReportId = 0x" +
+          LOG.info("{} had lastBlockReportId 0x{} but curBlockReportId = 0x{}",
+              storageInfo.getStorageID(),
+              Long.toHexString(storageInfo.getLastBlockReportId()),
               Long.toHexString(curBlockReportId));
           iter.remove();
           if (zombies == null) {
@@ -446,8 +448,10 @@ public class DatanodeDescriptor extends DatanodeInfo {
     }
 
     if (checkFailedStorages) {
-      LOG.info("Number of failed storage changes from "
-          + this.volumeFailures + " to " + volFailures);
+      if (this.volumeFailures != volFailures) {
+        LOG.info("Number of failed storages changes from {} to {}",
+            this.volumeFailures, volFailures);
+      }
       synchronized (storageMap) {
         failedStorageInfos =
             new HashSet<>(storageMap.values());
@@ -498,10 +502,9 @@ public class DatanodeDescriptor extends DatanodeInfo {
    */
   private void pruneStorageMap(final StorageReport[] reports) {
     synchronized (storageMap) {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Number of storages reported in heartbeat=" + reports.length
-            + "; Number of storages in storageMap=" + storageMap.size());
-      }
+      LOG.debug("Number of storages reported in heartbeat={};"
+              + " Number of storages in storageMap={}", reports.length,
+          storageMap.size());
 
       HashMap<String, DatanodeStorageInfo> excessStorages;
 
@@ -518,11 +521,11 @@ public class DatanodeDescriptor extends DatanodeInfo {
       for (final DatanodeStorageInfo storageInfo : excessStorages.values()) {
         if (storageInfo.numBlocks() == 0) {
           storageMap.remove(storageInfo.getStorageID());
-          LOG.info("Removed storage " + storageInfo + " from DataNode" + this);
-        } else if (LOG.isDebugEnabled()) {
+          LOG.info("Removed storage {} from DataNode {}", storageInfo, this);
+        } else {
           // This can occur until all block reports are received.
-          LOG.debug("Deferring removal of stale storage " + storageInfo
-              + " with " + storageInfo.numBlocks() + " blocks");
+          LOG.debug("Deferring removal of stale storage {} with {} blocks",
+              storageInfo, storageInfo.numBlocks());
         }
       }
     }
@@ -532,7 +535,7 @@ public class DatanodeDescriptor extends DatanodeInfo {
       Set<DatanodeStorageInfo> failedStorageInfos) {
     for (DatanodeStorageInfo storageInfo : failedStorageInfos) {
       if (storageInfo.getState() != DatanodeStorage.State.FAILED) {
-        LOG.info(storageInfo + " failed.");
+        LOG.info("{} failed.", storageInfo);
         storageInfo.setState(DatanodeStorage.State.FAILED);
       }
     }
@@ -600,7 +603,7 @@ public class DatanodeDescriptor extends DatanodeInfo {
   /**
    * Store block recovery work.
    */
-  void addBlockToBeRecovered(BlockInfoUnderConstruction block) {
+  void addBlockToBeRecovered(BlockInfo block) {
     if(recoverBlocks.contains(block)) {
       // this prevents adding the same block twice to the recovery queue
       BlockManager.LOG.info(block + " is already in the recovery queue");
@@ -642,12 +645,11 @@ public class DatanodeDescriptor extends DatanodeInfo {
     return replicateBlocks.poll(maxTransfers);
   }
 
-  public BlockInfoUnderConstruction[] getLeaseRecoveryCommand(
-      int maxTransfers) {
-    List<BlockInfoUnderConstruction> blocks = recoverBlocks.poll(maxTransfers);
+  public BlockInfo[] getLeaseRecoveryCommand(int maxTransfers) {
+    List<BlockInfo> blocks = recoverBlocks.poll(maxTransfers);
     if(blocks == null)
       return null;
-    return blocks.toArray(new BlockInfoUnderConstruction[blocks.size()]);
+    return blocks.toArray(new BlockInfo[blocks.size()]);
   }
 
   /**
@@ -662,16 +664,39 @@ public class DatanodeDescriptor extends DatanodeInfo {
   }
 
   /**
-   * @return Approximate number of blocks currently scheduled to be written 
+   * Find whether the datanode contains good storage of given type to
+   * place block of size <code>blockSize</code>.
+   *
+   * <p>Currently datanode only cares about the storage type, in this
+   * method, the first storage of given type we see is returned.
+   *
+   * @param t requested storage type
+   * @param blockSize requested block size
+   * @return
    */
-  public long getRemaining(StorageType t) {
+  public DatanodeStorageInfo chooseStorage4Block(StorageType t,
+      long blockSize) {
+    final long requiredSize =
+        blockSize * HdfsServerConstants.MIN_BLOCKS_FOR_WRITE;
+    final long scheduledSize = blockSize * getBlocksScheduled(t);
     long remaining = 0;
-    for(DatanodeStorageInfo s : getStorageInfos()) {
-      if (s.getStorageType() == t) {
-        remaining += s.getRemaining();
+    DatanodeStorageInfo storage = null;
+    for (DatanodeStorageInfo s : getStorageInfos()) {
+      if (s.getState() == State.NORMAL &&
+          s.getStorageType() == t) {
+        if (storage == null) {
+          storage = s;
+        }
+        long r = s.getRemaining();
+        if (r >= requiredSize) {
+          remaining += r;
+        }
       }
     }
-    return remaining;    
+    if (requiredSize > remaining - scheduledSize) {
+      return null;
+    }
+    return storage;
   }
 
   /**
@@ -858,8 +883,8 @@ public class DatanodeDescriptor extends DatanodeInfo {
     synchronized (storageMap) {
       DatanodeStorageInfo storage = storageMap.get(s.getStorageID());
       if (storage == null) {
-        LOG.info("Adding new storage ID " + s.getStorageID() +
-                 " for DN " + getXferAddr());
+        LOG.info("Adding new storage ID {} for DN {}", s.getStorageID(),
+            getXferAddr());
         storage = new DatanodeStorageInfo(this, s);
         storageMap.put(s.getStorageID(), storage);
       } else if (storage.getState() != s.getState() ||

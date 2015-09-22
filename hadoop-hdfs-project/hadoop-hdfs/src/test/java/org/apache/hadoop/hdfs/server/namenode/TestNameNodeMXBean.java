@@ -17,8 +17,8 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
-import org.apache.commons.io.FileUtils;
 import com.google.common.util.concurrent.Uninterruptibles;
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -26,6 +26,8 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.namenode.top.TopConf;
 import org.apache.hadoop.io.nativeio.NativeIO;
@@ -76,6 +78,15 @@ public class TestNameNodeMXBean {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       cluster.waitActive();
 
+      // Set upgrade domain on the first DN.
+      String upgradeDomain = "abcd";
+      DatanodeManager dm = cluster.getNameNode().getNamesystem().
+          getBlockManager().getDatanodeManager();
+      DatanodeDescriptor dd = dm.getDatanode(
+          cluster.getDataNodes().get(0).getDatanodeId());
+      dd.setUpgradeDomain(upgradeDomain);
+      String dnXferAddrWithUpgradeDomainSet = dd.getXferAddr();
+
       FSNamesystem fsn = cluster.getNameNode().namesystem;
 
       MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
@@ -125,6 +136,15 @@ public class TestNameNodeMXBean {
         assertTrue(((Long)liveNode.get("capacity")) > 0);
         assertTrue(liveNode.containsKey("numBlocks"));
         assertTrue(((Long)liveNode.get("numBlocks")) == 0);
+        // a. By default the upgrade domain isn't defined on any DN.
+        // b. If the upgrade domain is set on a DN, JMX should have the same
+        // value.
+        String xferAddr = (String)liveNode.get("xferaddr");
+        if (!xferAddr.equals(dnXferAddrWithUpgradeDomainSet)) {
+          assertTrue(!liveNode.containsKey("upgradeDomain"));
+        } else {
+          assertTrue(liveNode.get("upgradeDomain").equals(upgradeDomain));
+        }
       }
       assertEquals(fsn.getLiveNodes(), alivenodeinfo);
       // get attribute deadnodeinfo
@@ -173,7 +193,7 @@ public class TestNameNodeMXBean {
       // This will cause the first dir to fail.
       File failedNameDir = new File(nameDirUris.iterator().next());
       assertEquals(0, FileUtil.chmod(
-        new File(failedNameDir, "current").getAbsolutePath(), "000"));
+          new File(failedNameDir, "current").getAbsolutePath(), "000"));
       cluster.getNameNodeRpc().rollEditLog();
       
       nameDirStatuses = (String) (mbs.getAttribute(mxbeanName,
@@ -370,6 +390,25 @@ public class TestNameNodeMXBean {
       String topUsers =
           (String) (mbs.getAttribute(mxbeanNameFsns, "TopUserOpCounts"));
       assertNotNull("Expected TopUserOpCounts bean!", topUsers);
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test(timeout = 120000)
+  public void testQueueLength() throws Exception {
+    final Configuration conf = new Configuration();
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+      cluster.waitActive();
+      MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+      ObjectName mxbeanNameFs =
+          new ObjectName("Hadoop:service=NameNode,name=FSNamesystem");
+      int queueLength = (int) mbs.getAttribute(mxbeanNameFs, "LockQueueLength");
+      assertEquals(0, queueLength);
     } finally {
       if (cluster != null) {
         cluster.shutdown();

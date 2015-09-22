@@ -44,6 +44,7 @@ import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeLabel;
+import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
@@ -325,6 +326,8 @@ public class ResourceTrackerService extends AbstractService implements
     } else {
       LOG.info("Reconnect from the node at: " + host);
       this.nmLivelinessMonitor.unregister(nodeId);
+      // Reset heartbeat ID since node just restarted.
+      oldNode.resetLastNodeHeartBeatResponse();
       this.rmContext
           .getDispatcher()
           .getEventHandler()
@@ -397,8 +400,10 @@ public class ResourceTrackerService extends AbstractService implements
 
     NodeId nodeId = remoteNodeStatus.getNodeId();
 
-    // 1. Check if it's a valid (i.e. not excluded) node
-    if (!this.nodesListManager.isValidNode(nodeId.getHost())) {
+    // 1. Check if it's a valid (i.e. not excluded) node, if not, see if it is
+    // in decommissioning.
+    if (!this.nodesListManager.isValidNode(nodeId.getHost())
+        && !isNodeInDecommissioning(nodeId)) {
       String message =
           "Disallowed NodeManager nodeId: " + nodeId + " hostname: "
               + nodeId.getHost();
@@ -482,6 +487,19 @@ public class ResourceTrackerService extends AbstractService implements
     }
 
     return nodeHeartBeatResponse;
+  }
+
+  /**
+   * Check if node in decommissioning state.
+   * @param nodeId
+   */
+  private boolean isNodeInDecommissioning(NodeId nodeId) {
+    RMNode rmNode = this.rmContext.getRMNodes().get(nodeId);
+    if (rmNode != null &&
+        rmNode.getState().equals(NodeState.DECOMMISSIONING)) {
+      return true;
+    }
+    return false;
   }
 
   @SuppressWarnings("unchecked")

@@ -19,8 +19,10 @@ package org.apache.hadoop.hdfs.server.namenode;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.protocol.Block;
-import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockCollection;
 import org.apache.hadoop.hdfs.server.namenode.NameNode.OperationCategory;
+import org.apache.hadoop.hdfs.server.namenode.ha.HAContext;
 import org.apache.hadoop.hdfs.util.RwLock;
 import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.security.AccessControlException;
@@ -41,11 +43,14 @@ public interface Namesystem extends RwLock, SafeMode {
 
   boolean isGenStampInFuture(Block block);
 
+  BlockCollection getBlockCollection(long id);
+
   void adjustSafeModeBlockTotals(int deltaSafe, int deltaTotal);
 
   void checkOperation(OperationCategory read) throws StandbyException;
 
-  boolean isInSnapshot(BlockInfoUnderConstruction blockUC);
+  boolean isInSnapshot(BlockInfo blockUC);
 
   CacheManager getCacheManager();
+  HAContext getHAContext();
 }

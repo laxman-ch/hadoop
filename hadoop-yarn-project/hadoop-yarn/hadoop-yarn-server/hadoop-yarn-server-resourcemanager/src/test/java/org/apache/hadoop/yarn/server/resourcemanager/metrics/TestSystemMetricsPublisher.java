@@ -29,6 +29,7 @@ import java.util.Set;
 
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
@@ -36,6 +37,7 @@ import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.api.records.YarnApplicationAttemptState;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntity;
@@ -46,6 +48,7 @@ import org.apache.hadoop.yarn.server.metrics.AppAttemptMetricsConstants;
 import org.apache.hadoop.yarn.server.metrics.ApplicationMetricsConstants;
 import org.apache.hadoop.yarn.server.metrics.ContainerMetricsConstants;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
@@ -134,6 +137,25 @@ public class TestSystemMetricsPublisher {
       Assert.assertEquals(app.getQueue(),
           entity.getOtherInfo()
               .get(ApplicationMetricsConstants.QUEUE_ENTITY_INFO));
+
+      Assert.assertEquals(
+          app.getApplicationSubmissionContext().getUnmanagedAM(),
+          entity.getOtherInfo().get(
+              ApplicationMetricsConstants.UNMANAGED_APPLICATION_ENTITY_INFO));
+
+      Assert.assertEquals(
+          app.getApplicationSubmissionContext().getPriority().getPriority(),
+          entity.getOtherInfo().get(
+              ApplicationMetricsConstants.APPLICATION_PRIORITY_INFO));
+
+      Assert.assertEquals(app.getAmNodeLabelExpression(), entity.getOtherInfo()
+          .get(ApplicationMetricsConstants.AM_NODE_LABEL_EXPRESSION));
+
+      Assert.assertEquals(
+          app.getApplicationSubmissionContext().getNodeLabelExpression(),
+          entity.getOtherInfo()
+              .get(ApplicationMetricsConstants.APP_NODE_LABEL_EXPRESSION));
+
       Assert
           .assertEquals(
               app.getUser(),
@@ -339,7 +361,7 @@ public class TestSystemMetricsPublisher {
   }
 
   private static RMApp createRMApp(ApplicationId appId) {
-    RMApp app = mock(RMApp.class);
+    RMApp app = mock(RMAppImpl.class);
     when(app.getApplicationId()).thenReturn(appId);
     when(app.getName()).thenReturn("test app");
     when(app.getApplicationType()).thenReturn("test app type");
@@ -362,6 +384,16 @@ public class TestSystemMetricsPublisher {
     appTags.add("test");
     appTags.add("tags");
     when(app.getApplicationTags()).thenReturn(appTags);
+    ApplicationSubmissionContext asc = mock(ApplicationSubmissionContext.class);
+    when(asc.getUnmanagedAM()).thenReturn(false);
+    when(asc.getPriority()).thenReturn(Priority.newInstance(10));
+    when(asc.getNodeLabelExpression()).thenReturn("high-cpu");
+    when(app.getApplicationSubmissionContext()).thenReturn(asc);
+    when(app.getAppNodeLabelExpression()).thenCallRealMethod();
+    ResourceRequest amReq = mock(ResourceRequest.class);
+    when(amReq.getNodeLabelExpression()).thenReturn("high-mem");
+    when(app.getAMResourceRequest()).thenReturn(amReq);
+    when(app.getAmNodeLabelExpression()).thenCallRealMethod();
     return app;
   }
 

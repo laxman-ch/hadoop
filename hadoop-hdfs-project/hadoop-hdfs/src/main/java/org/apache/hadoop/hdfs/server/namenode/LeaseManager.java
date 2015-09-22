@@ -22,6 +22,7 @@ import static org.apache.hadoop.util.Time.monotonicNow;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -107,7 +108,11 @@ public class LeaseManager {
     long numUCBlocks = 0;
     for (Long id : getINodeIdWithLeases()) {
       final INodeFile cons = fsnamesystem.getFSDirectory().getInode(id).asFile();
-      Preconditions.checkState(cons.isUnderConstruction());
+      if (!cons.isUnderConstruction()) {
+        LOG.warn("The file " + cons.getFullPathName()
+            + " is not under construction but has lease.");
+        continue;
+      }
       BlockInfo[] blocks = cons.getBlocks();
       if(blocks == null) {
         continue;
@@ -128,15 +133,13 @@ public class LeaseManager {
 
   /** @return the number of leases currently in the system */
   @VisibleForTesting
-  public synchronized int countLease() {return sortedLeases.size();}
+  public synchronized int countLease() {
+    return sortedLeases.size();
+  }
 
   /** @return the number of paths contained in all leases */
-  synchronized int countPath() {
-    int count = 0;
-    for (Lease lease : sortedLeases) {
-      count += lease.getFiles().size();
-    }
-    return count;
+  synchronized long countPath() {
+    return leasesById.size();
   }
 
   /**
@@ -280,7 +283,9 @@ public class LeaseManager {
       return holder.hashCode();
     }
     
-    private Collection<Long> getFiles() { return files; }
+    private Collection<Long> getFiles() {
+      return Collections.unmodifiableCollection(files);
+    }
 
     String getHolder() {
       return holder;
